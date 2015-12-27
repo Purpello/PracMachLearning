@@ -1,0 +1,142 @@
+---
+title: "Predicting Excercise Quality"
+date: December 27, 2015
+author: Jayson Webb
+output: 
+  html_document:
+    theme: spacelab
+---
+##Executive Summary
+A weightlifting exercise data set was used to build a prediction model for five types of excercise performance (1 correct form and 4 incorrect forms).  Benchmarks were provided in a paper associated with the data, located at the website http://groupware.les.inf.puc-rio.br/har.  Those authors reported an out-of-sample prediction accuracy around 80%.  My random forest models had an out-of-sample accuracy of about 83% (tested on a separate validation data set) using 128 variables. Using 16 variables (a similar number of variables used by the aforementioned authors) that had the highest importance measures yielded a 74% out of sample accuracy.  Cross-validation strategy and overfitting concerns are addressed in the body of this report.
+
+##Data Preparation
+Testing and training data were provided separately for this project.  The training data was immediately split into 2 groups: an initial training set used to build and refine prediction models, and a validation set to test the out-of-sample prediction accuracy on data not used to build the models.  
+
+```{r eval=FALSE}
+#Load the libraries
+library(dplyr)
+library(caret)
+
+#Load the data files
+training<-read.csv("pml-training.csv",header=TRUE,na.strings=c('#DIV/0!', '', 'NA'),stringsAsFactors=FALSE)
+training$classe<-as.factor(training$classe)
+
+#Create validation and training data sets
+set.seed(816)
+inBuild<-createDataPartition(y=training$classe, p=0.7, list=FALSE)
+#We will use the validation data to estimate the out-of-sample prediction accuracy.
+validation<-training[-inBuild,]
+#We will use the buildData to build (train) and refine prediction models.
+buildData<-training[inBuild,]
+```
+
+##Feature Selection
+There were 160 variables in the data set, including the variable we wanted to predict, `classe`.  Doing detailed visualizations was not feasible.  But, we did discover that the skewness and kurtosis variables in the data set seemed to have a lot of strange values, especially !DIV0.  So, we decided to eliminate them from further consideration.  We also removed the first 7 variables, which were descriptors for the experiment, like participant name, time and date.
+
+We pre-processed the data using the `bagImpute` method to deal with missing values.  It was done as a separate step from training the model so that we could subset the imputed data more easily.  We then built a random forest model with the imputed data.  
+
+```{r eval=FALSE}
+#Remove skewness and kurtosis variables, remove the first 7 variables, 
+#remove the 160th variable - classe - for pre-processing, then add it back in later. 
+reduced<-select(buildData,everything(),
+             -contains("skewness"),
+             -contains("kurtosis"),
+             -c(1:7),
+             -160)
+
+set.seed(816)
+#bagImpute the data
+preProcA<-preProcess(reduced, method=c("bagImpute"))
+#Use "predict" to generate the imputed values.
+pA<-predict(preProcA,reduced)
+pA<-cbind(pA,classe=reduced$classe)
+
+#Setup 10-fold cross validation.
+trCtrl<-trainControl(method="cv",
+                     number=10)
+set.seed(816)
+#Train the random forest model with 10-fold cross validation.
+m3 <- train(classe ~.,data=pA,
+            trControl = trCtrl,
+            method="rf")
+```
+
+
+###Why Random Forest?
+I chose the random forest type of model because it seemed like it would be the most "robust" choice for this type of data: multi-class outcome variable, a lot of missing data, noisy data.  Also, in lectures, it was identified as one of the best types of models to use for prediction accuracy and it was the type of model used to analyze these data in the paper described in the executive summary.
+
+###What about Overfitting?
+The class lectures pointed to an [article](http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm) about random forest models by Leo Breiman and Adele Cutler which stated that:
+
+>Random forests does not overfit.
+
+That same lecture however did warn us that random forest models overfit.  I decided that I would detect overfitting by validating models with different numbers of predictors on a separate validation data set and pick the one with the highest prediction accuracy.
+
+###Cross-Validation Strategy
+Cross-validation was done in 2 ways.  First, the specification for building the random forest models included cross validation in the training control parameters (see the previous code chunk).  Secondly, we cross validated the prediction on separate validation data set aside for that purpose only. 
+
+###Variable Importance
+
+The figure below shows variable importance for the top 20 predictors from the random forest model described above.
+
+```{r eval = FALSE}
+plot(varImp(m3),top=20,main="Variable Importance, Top 20")
+```
+
+```{r echo = FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+library(caret)
+m3<-readRDS("m3.rds")
+predict_validation<-readRDS("predictv.rds")
+plot(varImp(m3),top=20,main="Variable Importance, Top 20")
+```
+
+##Evaluating Prediction Accuracy
+We evaluated 3 different random forest models:
+
+- **128 variables** - This is all of the variables after removing skewness and kurtosis variables and the 7 experiment description variables (participant, window, time, etc.).
+- **16 variables** - These were the top 16 variables by importance, as shown in the figure above.  These were chosen by trying to get a set of variables such that each sensor (belt, arm, forearm, dumbbell) was represented multiple times.  We also wanted to get a set that was about 10% of the original variables.  Only the arm sensor wasn't represented multiple times in this set.  The others were represented 5 or 6 times.
+- **5 variables** - The top 5 variables by importance.  The cutoff was chosen by finding the "elbow" in the variable importance graph.
+
+The table below shows the estimated and validated error rates for the three models described above.  The estimated error rate is the OOB error rated reported by printing out the summary for the random forest model (e.g. `m3$finalModel`).  The output of this for the 128 variable model is shown below.  The validated error rate was obtained by running the model on the validation data sample.  The output of this is shown for the 128 variable model below.
+
+This table shows the **importance of cross-validating your model on an independent sample**.  The OOB error rates estimated for the random forest model were WILDLY optimistic.  It also shows that using more variables produces a better prediction, at least in this case.  If we had overfitted with the 128 variable model, we would expect that the prediction error would be high, but it isn't.  The 17% error rate (83% accuracy rate) is comparable to what was reported in the paper mentioned in the executive summary.
+
+Model Vars | Estimated error rate | Validated error rate
+--- | ----- | --- | ---
+128 | 0.77% | 17% 
+ 16 | 0.76% | 27% 
+  5 | 3.17% | 47% 
+
+
+```{r eval=TRUE}
+#Show the estimated OOB error rate for the
+m3$finalModel
+```
+
+```{r eval=FALSE}
+#Reduce the validation data set in the same way we reduced the buildData
+v_reduced<-select(validation,everything(),
+                -contains("skewness"),
+                -contains("kurtosis"),
+                -c(1:7),
+                -160)
+
+set.seed(816)
+#Pre-process the validation data in the same way we did the buildData
+preProcB<-preProcess(v_reduced, method=c("bagImpute"))
+pB<-predict(preProcB,v_reduced)
+pB<-rbind(pB,classe=validation$classe)
+
+#Predict using our 128 variable model and the validation data set.
+pred_all<-predict(m3$finalModel,pB)
+#print the confusion matrix.
+confusionMatrix(pB$classe,pred_all)
+```
+
+```{r echo=FALSE}
+predict_validation
+```
+
+##Conclusions
+Our process yielded a model with out-of-sample prediction accuracy comparable to a published paper on the same data.  We used a single random forest model with 128 variables.  With more time and computing power, we would consider combining multiple models of different types (e.g. random forest, gbm) to improve prediction accuracy.
+
